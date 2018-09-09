@@ -1,0 +1,227 @@
+“分布式”对应的是“集中式”
+“微服务架构”对应的是“单体架构”
+
+其实上面两种分类的架构是有交叉的，同时也是各有利弊，并非“分布式”或者“微服务架构”就一定好，分布式引入了更多地复杂性，微服务引入了更难的监控和运维。
+
+好多技术都可以抽象出来本质的，而且必须抽象出来简单的模式和概念，否则会导致一团乱麻，陷入细节的泥沼。真正的学习是需要抽丝剥茧，从纷乱中看到本质。有几个基础关键点去发散和展开，从而铺开分布式系统的大网。  
+要使用抽象和建模的思想和方法论，来进行有效的学习。  所有的抽象和系统建模都回有一系列假设，比如假设网络连接不会出现故障， 假设越多的系统越简单和容易理解，但在现实世界中，这种系统越脆弱。越是健壮的系统模型，假设越少。在了解学习各种模型和算法时，一定要搞清楚它的假设（这些假设就是它的能力限制和不足）。
+
+在分布式系统中，核心技术就是：partition和replication。数据分散必须partition，系统要达到高可用必须replication（当然partition本身也部分提高了系统可用性，因为部分partition所在主机故障不影响其他partition的访问）。 然后围绕着partition会出现各种的问题，由此产生各种对应的方法和理论以及算法（比如consistent hashing，cross-partion query，auto-sharding等，如何使得分区均匀，同时满足数量的均匀和访问压力的均匀，以及支持动态分区---这也是NOSQL出现的一大原因）；而replication更是分布式的核心，是解决很多分布式问题的方法的源头（解决单点故障，满足高可用，读写分离提升性能等等），同时也是引起分布式诸多难题的根源（比如一致性问题：consistency，产生了各种一致性理论：强一致性/弱一致性/最终一致性等）。
+在集中式和分布式系统中，都会有buffer/cache，用以提高性能。在集中式架构中，CPU cache和disk buffer是为了加速访问数据，在分布式架构中，同样也是为了加速访问，在本地缓存一份数据。 只要有缓存，就会有一致性问题，因为出现了同一个数据出现了两份。（replication导致一致性问题，也是由于同一个数据出现了两份拷贝）。而数据库要求的隔离性，以及多线程访问同一个变量，这类问题则是由于多个客户端访问同一份数据导致的问题。
+多么奇妙啊！终于将他们关联起来了。
+ 多个客户端访问同一个数据时，即并发场景下：
+	有且仅有一份拷贝的情况下，会有隔离型问题。
+	有两份及以上拷贝的情况下，会有一致性问题。（内部隐含了隔离型问题）
+   上面的这些问题都是相互牵连，可以统一分析，找出规律。
+
+
+
+一、	active replication VS passive replication （state machine replication VS primary-backup approach）
+1)	主动复制是：client发送request给所有的节点（state machine node），每个节点都是一个状态机，这些节点对外部表现为一个整体，当所有节点执行这个request，将之应用到状态机之后，才返回给client一个成功的response。 在现实系统中，client实际上发送request给这些节点中的固定一个节点，由这个固定节点只是将request保存到其log中，并不执行该request，而是再广播该request给其余节点；这个节点就是leader节点，由leader节点负责和client交互（包括response to client）。Raft算法就是这样，它的leader节点就是做这个工作的，作为一个client request/reponse的路由和中转； Raft就是典型的一个replicated state machine 算法， 也就是主动复制：active replication。 paxos也是一种主动复制算法，并且支持client和所有节点交互，它不存在leader节点，所有节点都可以和client交互（接收client request和返回 response）
+ 
+2)	被动复制是：在所有节点中必须存在一个primary节点，由它和client交互，client发送request给primary节点，primary在收到request之后就直接执行并将结果应用到其状态机中，然后将state change（而不是client request本身）广播给其余节点。当primary收到广播的返回结果之后，再返回response给client。
+
+In active replication each client request is processed by all the servers. Active Replication was first introduced by Leslie Lamport under the name state machine replication. This requires that the process hosted by the servers is deterministic. Deterministic means that, given the same initial state and a request sequence, all processes will produce the same response sequence and end up in the same final state. In order to make all the servers receive the same sequence of operations, an atomic broadcast protocol must be used. An atomic broadcast protocol guarantees that either all the servers receive a message or none, plus that they all receive messages in the same order. The big disadvantage for active replication is that in practice most of the real world servers are non‐deterministic. Still active replication is the preferable choice when dealing with real time systems that require quick response even under the presence of faults or with systems that must handle byzantine faults.
+In passive replication there is only one server (called primary) that processes client requests. After processing a request, the primary server updates the state on the other (backup) servers and sends back the response to the client. If the primary server fails, one of the backup servers takes its place. Passive replication may be used even for non‐deterministic processes. The disadvantage of passive replication compared to active is that in case of failure the response is delayed.
+
+
+
+3)	上面两种复制也可以继续分为sync replication和async replication。
+
+二、	分布式一致性
+consensus problem是分布式系统的核心问题，翻译过来就是一致性问题，但是这个翻译容易和consistency混淆，因为consistency也是翻译成一致性；而实际上consensus是多个分布式进程对某一个事物（value或者leader election等）达成共识，而consistency则是多个副本的数据保持一致；两者意思完全不一样，consensus problem更具有普遍性和基础性，consensus problem的解决方法同样也可以解决consistency的问题（paxos本身是解决最基础的consensus problem的，就是多个进程队某个值达成共识；而通过组合paxos形成的multi-paxos则可以解决replicated state machine的consistency问题）。
+其实在英英词典中的翻译：consensus的意思是“A consensus is general agreement among a group of people”，就是“共识”的意思，根本就不应该翻译成“一致性”。 而consistent的意思是：“always behaving in the same way or having the same attitudes, standards etc”，就是“〔行为、态度、标准等〕一贯的，一致的”的意思。consensus problem包含了：transaction commit / leader election / atomic broadcast / Mutual exclusion / state machine replication等等问题。 可见，consensus problem是如此的重要，之所以如此重要是由于在网络和进程不稳定的分布式系统中，多个进程达成一个共识是极难的（指不需要第三方协调者，单纯依靠这些进程本身去达成共识。由第三方协调的话，比如由meta master负责多个副本数据的一致性，由masterr负责多个副本达成一致，那么要多个副本达成一致就比较容易了，但是这个master本身要极其可靠才行，因此master本身是要依靠consensus算法来维持的；通常master是由consensus算法实现的集群实现的，这又回到了consensus的复杂性上面了。总结一句话就是：复杂性从“维持多副本一致”转到“master维持”上了）。 
+
+三、	2PC和Paxos的关系
+原来 paxos就是2PC的改善升级版。本质上Paxos也是一个两阶段协议（propose和accept两个阶段），而2PC的两阶段提交，有很大的缺点：协调者故障问题/参与者故障问题/网络分区等问题，在multi-Paxos中，协调者本身就是从众多参与者中通过leader election选举出来的，可以解决协调者故障问题；同时multi-Paxos是一种多数派协议（major quorum），可以容忍F个参与者节点故障（参与者共有2F+1个的情况下），这样也就解决了参与者故障问题，同时也解决了部分网络分区的问题。疑问：为什么Leslie Lamport 会说paxos是3阶段协议呢？“Instead, I discovered the Paxos algorithm, described in this paper.  At the heart of the algorithm is a three-phase consensus protocol.”,看起来应该是在prepare/promise和accepte/accepted这两个阶段之外，由一个decide阶段，由proposer发送decided消息给所有的参与者，通知他们value最终确定的值。
+四、	多数派（major quorum）的思考
+几乎所有知名的consensus算法，包括paxos，raft，zab，viewstamped replication的内核都是使用多数派的思路，这是由于多数派是解决strong consistency最有效的方法，因为算法本身要能够最大限度的容忍更多的节点故障，同时要保证整个系统的strong consistency和availablity，就只能容忍最多f个节点（系统共有2f+1个节点），必须保留major quorum的正常运行才能维持系统的一致性。这个f是系统能够容忍节点故障的上限。我们假设不采用多数派思路，而是保留f个节点正常运行，容忍f+1个故障，那么就无法保证一致性，这种假定的系统，会在出现网络分区时，两个分区A和B都认为自己是正常的，都继续对外提供服务（包括写服务和更新服务），同时A和B不能通信，最终导致系统出现混乱和不一致。多数派思想就是避免出现这种现象的解决方案。
+五、	中心化和去中心化的复制
+在基于多数派的consensus算法的使用场景中，有两种截然不同的架构方案。以paxos算法为例，存在如下两种架构：
+	有leader的。所有client写操作都只和leader交互，client发给任意节点的请求都forward到leader，再由leader通过primary-copy方式（ZAB算法使用的passive replication）或者state machine replication方式（RAFT算法使用的active replication，leader作为中转站的主动复制）请client request（RAFT使用的）或者state update（ZAB使用的）发送到其它节点进行复制。 这个就是中心化的复制方案。针对读操作，可以只和leader交互（如果不允许读不一致的数据），或者可以从任意节点读取数据（如果允许读不一致的数据）。这句总结是错的，如果要保证强一致性的话，读操作也必须通过对应的一致性算法来操作才行，如果要提高单纯读操作（read-only）的性能，同时又要保持强一致性，就要使用一些特殊方法。
+	无leader的，client的写操作发送给多个节点（major quorum），多数派节点对本次写操作达成共识之后，返回成功的应答给client，而读操作也是和多节点交互，通过多数派的返回f个副本，比对时间戳（使用类似向量时钟技术），client能够找到最新的那个数据副本。这就是去中心化的复制方案。实际的使用方案中，client读写请求并不是直接群发给所有节点，而是发给其中的任意一个节点，再由该节点广播到其余节点。
+六、	Dynamo 和 BigTable中partition设计的思考
+Dynamo是一个分布式键值系统，partition采用的是键值hash，不需要meta server来保存分片的位置，直接依靠consistent hashing进行计算获得位置。而Bigtable则是将分片信息保存在meta server（在HBase架构中，是保存在HRegion中的hbase:meta表，而不是HMaster中），因此不需要consistent hashing方法。
+七、	故障检测、租约和心跳
+其实最难搞定的是：如何有效进行故障检测，通过心跳检测是最普遍的方案，但是，这有不小的弊端，心跳超时不能够区分出如下场景：“网络分区或拥塞”/“节点故障”/“节点负载过大”。尤其是对强一致性的系统，一定要能够判断出是节点问题还是网络问题，master需要确保该节点不能再提供服务，否则将出现多台服务器同时服务同一份数据而导致数据不一致的情况。
+八、	故障恢复
+九、	容灾
+十、	membership change --- 组成员变更
+这也是一个难点，和重要部分
+
+十一、	偏序，全序，因果序，FIFO序
+十二、	一致性模型
+一致性模型是一个约定，是分布式系统和客户端程序做的一个约定，约定客户端如果遵从某些规则可以达到某种一致性，越严格的一致性越是容易被程序员理解，也越容易保证程序目标的正确性。
+包含多路处理器架构中内存访问顺序，以及分布式系统的操作顺序，是否也去深入学习多路处理器和多线程。
+以顺序一致性（sequential consistency）为核心去学习，顺序一致性有两点要求：
+1. 单个进程中，按照program order的顺序执行全局来看，
+2. 各个进程来看，各个进程的操作order可以交叉，但是交叉结果必须是一致的，从各个进程的角度看是一致的。
+
+其实顺序一致性和多线程模型的执行类似，无分支循环的多线程中每个线程也都是交叉执行CPU的，每个线程都是按照线程程序自己的顺序执行的。
+
+线性一致性（Linearizability，又叫strong consistency）是更严格的一致性，是在顺序一致性基础上加上时间的考虑，在顺序一致性中，进程A中的操作m和进程B中的操作n没有必然的时间顺序（顺序一致性的结果可以是m在n前，也可以是n在m前）；然而，在线性一致性模型的处理结果中，m和n的顺序必须按照其操作的执行时间进行排序。具体是增加了如下的约束：如果操作m开始时间晚于n结束时间，则在Sequential Consistency定序时，要求n在m前。 
+其实还有一个关于线性一致性的定义：那就是任何操作的执行是“瞬时完成”，这个“瞬时”不是说调用之后间完成操作然后返回，而是说在操作调用和返回之间的某个点瞬时完成操作。这是最严格的一致性。 根据Raft算法的描述，要保证一致性，除了算法本身的逻辑之外，还要client interactive即客户端交互的配合，比如在Raft中，算法本身会保证写操作通过leader节点在多数派机器上面达到线性一致性，但是读操作如果是从任意一个节点直接读取，那么就导致不一致了，不能保证线性一致性；因此读操作必须也从leader节点走一遍Raft算法才能保证一致性。
+
+因果一致性是在顺序一致性基础上减弱要求，即：有因果关系的保证顺序一致性，而无因果关系的可以不用维持全局顺序，可以并发和乱序。
+
+严格一致性（strict consistency）是指任何操作瞬时完成，就像单个副本的分布式存储。这个是最严格的一致性，现实世界不可能达到。但是可以作为数序模型来指导现实世界的分布式存储的设计。其实不考虑性能，是可以通过如下方法实现的：“让整个系统只在单个节点的单个线程运行。或者，在系统粒度上，读写操作被读写锁保护起来（另一种形式的单点运行）。”
+
+分析一致性模型时，最好最容易理解的方式是从客户端进程的角度去分析，然后再结合分布式存储的内部实现。尤其是利用2-4个客户端进程的写操作和读操作序列做例子去分析，如图一所示，每个client进程对分布式存储系统的读写操作请求，任意请求的返回时间和实际work的时间可以是不对应的，比如当client P1发送一个Write(x=1)的写请求Request1，Client P2发送一个Write(x=2)的写请Request2，两者可以并发在存储系统中执行，当存储系统返回Reponse1给P1的时候，write(x=1)并不一定已经work起作用了，有可能存储只是暂时将Request1存到操作日志，或者只是在leader节点起作用，其它节点的副本还没其作用，而存储系统可以自己来组织并发请求的执行顺序。下面三篇文章是分析一致性很好的文章。
+https://36kr.com/p/5037166.html
+http://danielw.cn/history-of-distributed-systems-2
+http://danielw.cn/network-failure-models
+
+ 图 一 .  一致性分析模型
+
+ 
+图二 多处理器模
+
+
+下面是网上对于顺序一致性和线性一致性最好最简明的解读：
+Linearizability和Sequential Consistency你可以把它们想象成一个烧烤架, 上面有很多烤串, 你不可以把肉和洋葱在一个烤叉上互换位置(单个进程需要符合program order), 但是你可以拨动所有烤叉上的肉和洋葱, 让他们从左往右排列出来一个先后顺序. 不管是Linearizability还是Sequential Consistency, 那么下面A和C谁在前面都可以, 因为A和C是并行的, 但是C和B在Linearizabiltiy中必须C在前B在后, 而Sequential Consistency中B和C的顺序可以互换.
+ 
+因果一致性：比顺序一致性更松的一致性，为了提升性能，放松顺序一致性的全序要求，只关注有因果关系的操作，有因果关系的操作顺序必须对所有进程看到是一致的，而不同进程可以看到不同的并发操作的顺序。
+因果一致性 causal consistency
+当一个读操作后面跟着一个写操作时，这两个事件就具有潜在的因果关系，同样，读操作也与为读操作提供数据的写操作因果相关。没有因果关系的操作被称为并发的。
+所有进程必须以相同的顺序看到具有潜在因果关系的写操作，不同机器上的进程可以以不同的顺序被看到并发的写操作。
+实现因果一致性要求跟踪哪些进程看到了哪些写操作。这就意味着必须构建和维护一张记录哪些操作依赖于哪些操作的依赖关系图。一种实现方法是向量时间戳。
+
+ 
+因果关系，就是Lamport在Lamport在分布式时钟事件序论文中描述的happen-before关系及其传递闭包，即如下三种因果：
+	同一个进程内的事件A早于B (program order)
+	A完成后发消息通知触发B
+	已知A<B，B<C，根据传递性质推到出来的A<C
+Causal Consistency要求，如果两个事件有因果关系，则要求这两个事件的先后顺序满足因果序，并且所有进程看到的这两个事件的顺序都是满足这个因果序的。
+Causal Consistency相比Sequential Consistency来说，仅要求有因果关系的事件顺序对所有进程看到的一致，没有因果关系的事件顺序对于所有进程可以不一致。
+
+
+FIFO一致性：FIFO Consistency要求同一个进程的program order下的几个操作被其他所有进程看到的顺序是相同的。但是不同进程的几个操作被其他所有进程看到的顺序可能是不同的（即使有因果关系）。 简单的说，FIFO一致性是放松了顺序一致性，和顺序一致性一样要求保持program order，但不同点在于：顺序一致性要求所有进程看到一致的全局操作顺序，而FIFO一致性可以让不同进程看到不同的全局操作顺序，只需要保证一点：同一个进程的program order的顺序必须维持住就行。
+
+最终一致性：是一种妥协，为提高性能做的妥协，副本会有短时间的不一致，但是最终，所有副本会保持一致。更正式的说法是：在没有新的更新操作情况下，最终，所有的请求都会返回最后更新的副本数据。  
+
+顺序一致性、线性一致性和因果一致性是按照Data-centric Consistency Models分析划分的。
+而最终一致性是按照Client-centric Consistency Models分析划分的。更有趣的是：因果一致性保证如下四个一致性要求，这四个要求是分布式存储系统的最低保证了，否则存储系统对程序员来说没有使用价值，因为保证太少，程序员难以使用：
+	Read Your Writes : this means that preceding write operations are indicated and reflected by the following read operations.
+	Monotonic Reads: this implies that an up-to-date increasing set of write operations is guaranteed to be indicated by later read operations.
+	Writes Follow Reads: this provides an assurance that write operations follow and come after reads by which they are influenced.
+	Monotonic Writes: this guarantees that write operations must go after other writes that reasonably should precede them.
+而这四个一致性要求，分别是：读写一致性、单调读一致性、写跟随读一致性和单调写一致性，这四个一致性是按照Client-centric Consistency Models划分的，而因果一致性是按照Data-centric Consistency Models划分的。
+最终一致性的几种具体实现：
+1、读不旧于写一致性（Read-your-writes consistency）：使用者读到的数据，总是不旧于自身上一个写入的数据。
+2、会话一致性（Session consistency）：比读不旧于写一致性更弱化。使用者在一个会话中才保证读写一致性，启动新会话后则无需保证。
+3、单读一致性（Monotonic read consistency）：读到的数据总是不旧于上一次读到的数据。
+4、单写一致性（Monotonic write consistency）：写入的数据完成后才能开始下一次的写入。
+5、写不旧于读一致性（Writes-follow-reads consistency）：写入的副本不旧于上一次读到的数据，即不会写入更旧的数据。
+Werner Vogels认为：在很多互联网应用中，单读一致性＋读不旧于写一致性可以提供足够的一致性了。
+
+弱一致性：系统中的某个数据被更新后，后续对该数据的读取操作可能得到更新后的值，也可能是更改前的值。
+十三、	ACID中的隔离性
+十四、	故障模型
+从强到弱，分为四种：
+	拜占庭故障，最复杂和难以解决的故障，一般不在考虑范围
+	Fail-Recovery 故障，市面上多数分布式系统容忍的故障，比如kafka（In distributed systems terminology we only attempt to handle a "fail/recover" model of failures where nodes suddenly cease working and then later recover (perhaps without knowing that they have died). Kafka does not handle so-called "Byzantine" failures in which nodes produce arbitrary or malicious responses (perhaps due to bugs or foul play).）
+	omission 故障
+	Fail-stop 故障
+十五、	系统模型
+分布式系统的系统模型有两类：同步系统和异步系统，这个概念并非类似同步阻塞IO和异步非阻塞IO的概念，而是指同步系统模型中：网络传输时间有上限；所有节点的时钟漂移有上限；所有节点的计算速度一样。 而异步系统模型中，网络传输时间无上限，节点的时钟漂移无上限，节点的计算速度不可预料。其实从asynchronous的英文解释中< (digital communication) pertaining to a transmission technique that does not require a common clock between the communicating devices; timing signals are derived from special characters in the data stream itself> 和 < asynchronous computer processes happen at different times or rates >发现就是这个意思。
+十六、	线性化（linearizability） VS 串行化（serializability）
+	线性化是分布式系统一致性模型中的一种一致性的保证，多个client对分布式存储系统中单个对象进行读写操作的一种保证，又称为强一致性。是CAP理论中的C，针对单个对象操作。是一种local property，是关于单个对象访问的property
+	串行化是操作系统事务中的一种概念，是隔离性的保证，是ACID中的I，针对事务。支持事务的数据库系统必须有效地对操作进行同步以保证事务之间的隔离性。最简单的方法就是串行执行事务～可以按任意次序一次一次地执行事务。遗憾的是，这种解决方案对有多个交互用户共享其资源的服务器而言是不可接受的。 任何支持事务的服务器的目标就是最大限度的实现并发，因此如果事务的并发执行与串行执行具有相同效果，即他们是串行等级（serially equivalent）的或可串行化（serializable）的，那么可允许事务并发执行。 串行化是一种global property，是关于多个对象访问的property。
+根据上面的理解，线性化和串行化能够很好的区分开来。再深入一点，如果把对分布式单个对象的地个读/写操作看作是一个事务的话，可以把线性化理解为更严格的串行化。
+
+十七、	多客户端、应答时间（latency）、并发、缓存
+其实所有的系统，不管是多处理器架构、分布式系统、数据库以及多线程架构，甚至包括文件系统，都有共性问题，这些共性问题其实解决思路是共通的，如下：
+1.	并发：
+要同时支持成千上万的客户端（对多线程和多处理器架构而言，客户端就是线程本身），这些client的访问和操作不能混淆和混乱，因此最简单的解决方案就是将这些访问操作串行化，然后系统每次只处理一个访问操作。但是这个方案导致系统没有并发能力，客户端请求操作长时间排队等待，是不可接受的。因此出现了各种技术和方案来解决这个问题，以使系统能够实现最大程度的并发。即：并发处理客户端请求。
+要很好地弄清这些问题，就一定要搞明白“一个操作或者事务结束”实际上有两种不同的含义：一个是a：对client request有一个successful response； 一个是b：系统内部真正彻底完成了client request的操作。通常系统为了提高系统并发性，都是在b未完成之前就做了a（举个例子：write operation未持久化而是写到buffer就返回成功，对client来说这个write operation已经结束，但是对存储系统来说并没彻底完成；类似的例子还有：write operation到leader，并没有复制到其它副本，就返回成功），而不是等到b完成才做a。这个思路一定要清晰，它是理解分布式一致性和其它概念的核心基础。
+2.	缓存：
+要提升系统的处理性能，就必须使用缓存。数据的持久化是必须的，但是持久化存储（比如disk）的读写速度太慢，因此需要将读写数据缓存到内存甚至CPU Cache，这样才能加快处理速度。Cache和Buffer是如此普遍的应用，在带来系统性能提升同时也带来很多问题，诸如一致性问题。
+十八、	系统分析方法
+根据对一致性模型的学习，总结了两种对一个系统的分析方法：
+1.	Data-centric   
+从系统内部对数据的处理来分析
+2.	Client-centric
+从连接到系统的client的角度分析，从对client的读写访问的角度分析
+十九、	租约(lease)
+    In computer science, a Lease is a contract that gives its holder specified rights to some resource for a limited period. Because it is time-limited, a lease is an alternative to a lock for resource serialization.
+    The term 'lease' was applied to this concept in a 1989 paper by Cary G. Gray and David R. Cheriton,[1] but similar concepts (expiring tokens[2] and breakable locks with timeouts[3]) had been used in prior systems. 根据维基上的描述，租约实际上是一个lock，用来锁定某些资源，不过这个lock是breakable的，有时效期的，时效过了，自动解锁。
+到底租约是什么？
+在很多时候，租约的定义似乎很模糊，有的时候租约类似心跳，有的时候又类似于锁。到底租约的本质是什么呢？
+回到租约最原始的定义：租约就是在一定期限内给予持有者特定权力的 协议。我觉得这里的期限就是租约的根本特性，正是这一特性使得租约可以容忍机器失效和网络分割。在期限之内，租约其实就是服务器和客户端之间的协议，而这 个协议的内容可以五花八门。如果协议内容是服务器确认客户端还存活，那么这个租约的功能就相当于心跳；如果协议内容是服务器保证内容不会被修改，那么这个 租约就相当于读锁；如果协议内容是服务器保证内容只能被这个客户端修改，那么这个租约就相当于写锁。租约这种灵活性和容错性，使其成为了维护分布式系统一致性的有效工具。
+
+租约机制由于是一种timeout的lock，依赖于分布式节点时钟的一致性，节点之间只可容忍较小的时钟漂移，需要能够做到时钟同步才行。
+二十、	读与写的权衡
+读和写操作时互为影响的两个操作，系统在设计时，依据读写操作的比例，来合理进行架构设计，来满足最终需求。 
+	对于读比写更频繁的系统，比如chubby，chubby提供小文件存储和分布式锁服务，读比写频繁得多，因此为了提升读的性能，就要牺牲掉部分写的性能，具体是：使用租约机制，客户端获得租约，并缓存数据，在读的时候直接从缓存中取，不需要和master联系，加快性能；而在写的时候，服务器在写之前首先向所有可能缓存该数据的客户端发送“缓存过期”的信息，等到Master在接收到所有相关的客户端针对该过期信号的应答后（应答包括两类，一种是客户端明确要求更新缓存，另一类则是客户端允许缓存租期过期），再继续之前的写操作。 这就是牺牲写性能来换取读性能。
+	对于写比更频繁的系统，尤其是对于大数据的写，比如HBase，则采用LSM树的方案，直接在内存中写，写到memcache，后续刷到磁盘；而对于读，则需要进行memcache、blockcache和HFile的综合，才能读取到最新的数据。这就是典型的牺牲读性能来换取写性能。
+
+
+二十一、	极其重要概念的澄清
+
+多线程中的Critical section(临界区)，其实和数据库中的Transaction(事务)非常类似，是一个概念，都是属于并发问题，基本100%的相通，可以一起综合分析。
+1. 临界区中包含共享资源的访问，多个线程同时访问这些资源； 事务中包含表的访问，多个客户端同时访问这些表。
+2. 临界区的执行必须是原子性的和隔离性的；而事物的执行也必须是原子性和隔离性的。
+3. 临界区的隔离性要达到可串行化serializability，事务的隔离性也要求达到可串行化serializability。 他们都使用了锁来实现。
+4. 事务要求一致性和持久化，这两点，临界区并不涉及。
+
+而和多线程相关的多处理器架构中，缓存一致性(cache conheren)和分布式系统的一致性，概念上很类似，都是同一个数据多个副本达到一致性的问题。java和C++中的Volatile修饰符，就是用来解决多处理器中数据的不一致性，具体就是：告诉编译器，这个变量不要进行优化，读写都要在内存中做，不要从Cache中取也不要在Cache中缓存，这种技术就是内存屏障。
+
+分布式系统中没有隔离性的概念，这是由于分布式系统中，每个client的操作都是单步操作：read 或者 write，单步操作一步完成，不需要隔离。（实际是需要隔离的，不过在真实可用的分布式系统中做到了每一步操作的可串行化，就是顺序一致性，sequential consistency，做到每一步操作互不打扰，互不干扰实际上就是串行化。可串行化是最低的要求，因为它不保证先后顺序，而顺序一致性就是一种串行化，不过在分布式系统中又加上一个限制：同时要求多个副本上看到一致的操作顺序。 可串行化 加上 时间先后的限制，就变成 线性化了 Linearizability。 虽然这样理解是可以的，但是最好还是将 “可串行化”概念用在数据库事务中，把它和ACID中的隔离性关联起来，否则容易迷糊。 下面的<Linearizability versus Serializability>）。 而在多线程临界区和数据库事物中，一个执行并不是一步完成的，而是包含多步操作的，这些操作是作为整体，不能被分割的，但是实际上在执行中间会被干扰（单处理器的多线程中，CPU调度会打断执行；多处理器的多线程中，CPU会并发执行多线程中的每个线程；数据库中，数据库执行引擎会并发执行多个客户端的操作。），因此为了防止被干扰，就要使用类似锁的机制保持共享资源的独占性。
+
+
+
+Linearizability versus Serializability
+24 Sep 2014
+Linearizability and serializability are both important properties about interleavings of operations in databases and distributed systems, and it’s easy to get them confused. This post gives a short, simple, and hopefully practical overview of the differences between the two.
+Linearizability: single-operation, single-object, real-time order
+Linearizability is a guarantee about single operations on single objects. It provides a real-time (i.e., wall-clock) guarantee on the behavior of a set of single operations (often reads and writes) on a single object (e.g., distributed register or data item).
+In plain English, under linearizability, writes should appear to be instantaneous. Imprecisely, once a write completes, all later reads (where “later” is defined by wall-clock start time) should return the value of that write or the value of a later write. Once a read returns a particular value, all later reads should return that value or the value of a later write.
+Linearizability for read and write operations is synonymous with the term “atomic consistency” and is the “C,” or “consistency,” in Gilbert and Lynch’s proof of the CAP Theorem. We say linearizability is composable (or “local”) because, if operations on each object in a system are linearizable, then all operations in the system are linearizable.
+Serializability: multi-operation, multi-object, arbitrary total order
+Serializability is a guarantee about transactions, or groups of one or more operations over one or more objects. It guarantees that the execution of a set of transactions (usually containing read and write operations) over multiple items is equivalent to some serial execution (total ordering) of the transactions.
+Serializability is the traditional “I,” or isolation, in ACID. If users’ transactions each preserve application correctness (“C,” or consistency, in ACID), a serializable execution also preserves correctness. Therefore, serializability is a mechanism for guaranteeing database correctness.1
+Unlike linearizability, serializability does not—by itself—impose any real-time constraints on the ordering of transactions. Serializability is also not composable. Serializability does not imply any kind of deterministic order—it simply requires that some equivalent serial execution exists.
+Strict Serializability: Why don’t we have both?
+Combining serializability and linearizability yields strict serializability: transaction behavior is equivalent to some serial execution, and the serial order corresponds to real time. For example, say I begin and commit transaction T1, which writes to item x, and you later begin and commit transaction T2, which reads from x. A database providing strict serializability for these transactions will place T1 before T2 in the serial ordering, and T2 will read T1’s write. A database providing serializability (but not strict serializability) could order T2 before T1.2
+As Herlihy and Wing note, “linearizability can be viewed as a special case of strict serializability where transactions are restricted to consist of a single operation applied to a single object.”
+Coordination costs and real-world deployments
+Neither linearizability nor serializability is achievable without coordination. That is we can’t provide either guarantee with availability (i.e., CAP “AP”) under an asynchronous network.3
+In practice, your database is unlikely to provide serializability, and your multi-core processor is unlikely to provide linearizability—at least by default. As the above theory hints, achieving these properties requires a lot of expensive coordination. So, instead, real systems often use cheaper-to-implement and often harder-to-understand models. This trade-off between efficiency and programmability represents a fascinating and challenging design space.
+A note on terminology, and more reading
+One of the reasons these definitions are so confusing is that linearizability hails from the distributed systems and concurrent programming communities, and serializability comes from the database community. Today, almost everyone uses both distributed systems and databases, which often leads to overloaded terminology (e.g., “consistency,” “atomicity”).
+There are many more precise treatments of these concepts. I like this book, but there is plenty of free, concise, and (often) accurate material on the internet, such as these notes.
+Notes
+1.	But it’s not the only mechanism!
+Granted, serializability is (more or less) the most general means of maintaining database correctness. In what’s becoming one of my favorite “underground” (i.e., relatively poorly-cited) references, H.T. Kung and Christos Papadimitriou dropped a paper in SIGMOD 1979 on “An Optimality Theory of Concurrency Control for Databases.” In it, they essentially show that, if all you have are transactions’ syntactic modifications to database state (e.g., read and write) and no information about application logic, serializability is, in some sense, “optimal”: in effect, a schedule that is not serializable might modify the database state in a way that produces inconsistency for some (arbitrary) notion of correctness that is not known to the database.
+However, if do you know more about your user’s notions of correctness (say, you are the user!), you can often do a lot more in terms of concurrency control and can circumvent many of the fundamental overheads imposed by serializability. Recognizing when you don’t need serializability (and subsequently exploiting this fact) is the best way I know to “beat CAP.” ↩
+2.	Note that some implementations of serializability (such as two-phase locking with long write locks and long read locks) actually provide strict serializability. As Herlihy and Wing point out, other implementations (such as some MVCC implementations) may not.
+So, why didn’t the early papers that defined serializability call attention to this real-time ordering? In some sense, real time doesn’t really matter: all serializable schedules are equivalent in terms of their power to preserve database correctness! However, there are some weird edge cases: for example, returning NULL in response to every read-only transaction is serializable (provided we start with an empty database) but rather unhelpful.
+One tantalizingly plausible theory for this omission is that, back in the 1970s when serializability theory was being invented, everyone was running on single-site systems anyway, so linearizability essentially “came for free.” However, I believe this theory is unlikely: for example, database pioneer Phil Bernstein was already looking at distributed transaction execution in his SDD-1 system as early as 1977 (and there are older references yet). Even in this early work, Bernstein (and company) are careful to stress that “there may in fact be several such equivalent serial orderings” [emphasis theirs]. To further put this theory to rest, Papadimitriou makes clear in his seminal 1979 JACM article that he’s familiar with problems inherent in a distributed setting. (If you ever want to be blown away by the literature, look at how much of the foundational work on concurrency control was done by the early 1980s.) ↩
+3.	For distributed systems nerds: achieving linearizability for reads and writes is, in a formal sense, “easier” to achieve than serializability. This is probably deserving of another post (encouragement appreciated!), but here’s some intuition: terminating atomic register read/write operations are achievable in a fail-stop model. Yet atomic commitment—which is needed to execute multi-site serializable transactions (think: AC is to 2PC as consensus is to Paxos)—is not: the FLP result says consensus is unachievable in a fail-stop model (hence with One Faulty Process), and (non-blocking) atomic comm
+4.	itment is “harder” than consensus (see also). Also, keep in mind that linearizability for read-modify-write is harder than linearizable read/write. (linearizable read/write《 consensus《 atomic commitment) ↩
+
+
+I've been trying to grasp serializability and linearizability in the context of software transactional memory. However, I think both notions can be applied to transactional memory in general.
+At this point, the following is my understanding of both subjects.
+Serializability
+Serializability is a global property. It is a correctness property of transactions. Given kprocesses that each execute a transaction Tkconcurrently, serializability ensures that there is a sequence of transactions that can be executed in sequence (i.e., one after the other) such that the end result is the same as the transactions being executed concurrently. So there is a permutation of the list (T1, T2,..,Tk) that defines a list of transactions that can be executed sequentially.
+This property makes perfect sense to me and I think my definition is correct. I based this definition on the text in "The Art of Multiprocessor programming" by Herlihy and Shavit.
+Linearizability
+Linearizability is a local property of concurrent objects (e.g., an instance of a class that is shared amongst threads). Linearizability ensures that when two processes each execute a series op method calls (e.g., queue or dequeue on a Queue instance) on that shared object there is a sequential ordering of these method calls that does not necessarily preserve program order (the order in which the programmer wrote them down), but each method call does seem to happen instantly (i.e., invocation and response follow each other directly), whilst maintaining the result of each method call individually and consequently the object its state.
+Question
+According to a paper "On the correctness of TM" by Guerraoui and Kapalka this is the definition of linearizability in context of TM:
+.. a safety property devised to describe shared objects, is sometimes used as a correctnes criterian for TM. In the TM terminology linearizability means that intuitively, every transaction should appear as if it took place at some single unique point in time during its lifespan.
+This definition just seems to resemble serializability to me. But the paper further on defines serializability as follows:
+.. is one of the most commonly required properties of a database transaction. Roughly speaking, a history H of transactions (i.e., the sequence of all operations performed by all transactions in a given execution) is serializable if all committed transactions in H issue the same operations and receive the same responses as in some sequential history S that consists of only the committed transactions in H. (A sequential history is one without concurrency between the transactions).
+This definition however seems to imply that one can reorder statements from transactions in such a way that they are interleaved. (I.e. reorder the statements such that not all the statements of a transaction T appear in sequence in H).
+________________________________________
+I am under the assumption that my personal above definitions are correct. My actual question is how linearizability is defined in the context of transactional memory. It makes no sense to reason about each method call (i.e., read/write operation) in a transaction individually as this would break the semantic of transactional memory. Nor would it make sense to having to reason about two concurrent transactions their interleavings, as this would obviously break serializability. Does linearizability mean that one can reorder individual operations inside a transaction? If linearizability is a stronger form of serializability, it should not matter in which order the operations are executed inside a single transaction.
+In short: First of all, is my understanding of serializability and linearizability correct? I am confused after reading a plethora of definitions in different works. And second, what does it mean for a set of transaction to be linearizable?
+I have also read the question that was linked inside of the comments. But it did not explain to me my specific question.
+Sources
+•	SO question on the topic (not about STM explicitly)https://stackoverflow.com/questions/4179587/difference-between-linearizability-and-serializability
+•	An informal explanation about the two http://www.bailis.org/blog/linearizability-versus-serializability/
+•	Original paper on serializability http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.92.2690&rep=rep1&type=pdf
+•	[1] Original paper on linearizabilityhttp://www.cs.toronto.edu/~christoff/files/Linearizability-ACorrectnessConditionForConcurrentObjects.pdf
+
+
